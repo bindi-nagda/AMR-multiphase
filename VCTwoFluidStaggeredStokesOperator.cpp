@@ -68,8 +68,8 @@ static const std::string SC_DATA_REFINE_TYPE =
                                                // cells on refine patch
 static const bool USE_CF_INTERPOLATION = true; // Refine Patch Strategy: CartSideDoubleQuadraticCFInterpolation.
 static const std::string DATA_COARSEN_TYPE =
-    "CUBIC_COARSEN"; // going from fine to coarse. fill in coarse cells by whatever is in the fine cells. synchronizing
-                     // the hierarchies
+    "CONSERVATIVE_COARSEN"; // going from fine to coarse. fill in coarse cells by whatever is in the fine cells.
+                            // synchronizing the hierarchies
 
 // Type of extrapolation to use at physical boundaries.
 static const std::string BDRY_EXTRAP_TYPE = "LINEAR"; // these operations are all in IBAMR

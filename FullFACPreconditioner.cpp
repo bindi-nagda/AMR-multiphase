@@ -354,7 +354,7 @@ FullFACPreconditioner::transferToDense(std::set<int> idxs, bool deallocate_data)
         auto var_db = VariableDatabase<NDIM>::getDatabase();
         Pointer<Variable<NDIM>> var;
         var_db->mapIndexToVariable(idx, var);
-        Pointer<CoarsenOperator<NDIM>> coarsen_op = grid_geom->lookupCoarsenOperator(var, "CUBIC_COARSEN");
+        Pointer<CoarsenOperator<NDIM>> coarsen_op = grid_geom->lookupCoarsenOperator(var, "CONSERVATIVE_COARSEN");
         coarsen_alg->registerCoarsen(idx, idx, coarsen_op);
     }
     std::vector<Pointer<CoarsenSchedule<NDIM>>> coarsen_scheds(level_diff);
@@ -406,7 +406,7 @@ FullFACPreconditioner::transferToDense(const SAMRAIVectorReal<NDIM, double>& bas
     for (int comp = 0; comp < dense_x.getNumberOfComponents(); ++comp)
     {
         Pointer<CoarsenOperator<NDIM>> coarsen_op =
-            grid_geom->lookupCoarsenOperator(dense_x.getComponentVariable(comp), "CUBIC_COARSEN");
+            grid_geom->lookupCoarsenOperator(dense_x.getComponentVariable(comp), "CONSERVATIVE_COARSEN");
         int dense_idx = dense_x.getComponentDescriptorIndex(comp);
         coarsen_alg->registerCoarsen(dense_idx, dense_idx, coarsen_op);
     }

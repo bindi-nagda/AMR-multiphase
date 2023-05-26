@@ -226,6 +226,7 @@ private:
     void performProlongation(const std::array<int, 3>& dst_idxs, const std::array<int, 3>& src_idxs, int dst_ln);
     void performRestriction(const std::array<int, 3>& dst_idxs, const std::array<int, 3>& src_idxs, int dst_ln);
     void performGhostFilling(const std::array<int, 3>& dst_idxs, int dst_ln);
+    void performSynch(const std::array<int, 2>& dst_idxs, int dst_ln);
     //\}
 
     /*
@@ -244,11 +245,6 @@ private:
     SAMRAI::tbox::Pointer<SAMRAI::tbox::Database> d_coarse_solver_db;
 
     /*
-     * Patch overlap data.
-     */
-    std::vector<std::vector<SAMRAI::hier::BoxList<NDIM>>> d_patch_bc_box_overlap;
-
-    /*
      * Coarse-fine interface interpolation objects.
      */
     SAMRAI::tbox::Pointer<CoarseFineBoundaryRefinePatchStrategy> d_sc_bdry_op, d_cc_bdry_op;
@@ -259,6 +255,7 @@ private:
     std::vector<SAMRAI::tbox::Pointer<SAMRAI::xfer::RefineSchedule<NDIM>>> d_prolong_scheds;
     std::vector<SAMRAI::tbox::Pointer<SAMRAI::xfer::CoarsenSchedule<NDIM>>> d_restrict_scheds;
     std::vector<SAMRAI::tbox::Pointer<SAMRAI::xfer::RefineSchedule<NDIM>>> d_ghostfill_no_restrict_scheds;
+    std::vector<SAMRAI::tbox::Pointer<SAMRAI::xfer::RefineSchedule<NDIM>>> d_synch_scheds;
 
     int d_thn_idx = IBTK::invalid_index;
     int d_un_scr_idx = IBTK::invalid_index, d_us_scr_idx = IBTK::invalid_index, d_p_scr_idx = IBTK::invalid_index;
@@ -280,6 +277,13 @@ private:
         d_P_fill_pattern;
     std::vector<IBTK::HierarchyGhostCellInterpolation::InterpolationTransactionComponent> transaction_comps;
     SAMRAI::tbox::Pointer<IBTK::HierarchyGhostCellInterpolation> d_hier_bdry_fill, d_no_fill;
+
+    // Patch overlap data
+    std::vector<std::vector<std::array<SAMRAI::hier::BoxList<NDIM>, NDIM>>> d_patch_side_bc_box_overlap;
+    std::vector<std::vector<SAMRAI::hier::BoxList<NDIM>>> d_patch_cell_bc_box_overlap;
+    std::vector<std::vector<std::array<std::map<int, SAMRAI::hier::Box<NDIM>>, NDIM>>> d_patch_side_neighbor_overlap;
+    std::vector<std::vector<std::map<int, SAMRAI::hier::Box<NDIM>>>> d_patch_cell_neighbor_overlap;
+    std::array<int, 3> d_scratch_idxs;
 };
 } // namespace IBTK
 
