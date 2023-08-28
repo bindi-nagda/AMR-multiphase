@@ -234,6 +234,10 @@ public:
 protected:
     void setupPlotDataSpecialized() override;
 
+    void regridHierarchyBeginSpecialized() override;
+
+    void regridHierarchyEndSpecialized() override;
+
 private:
     /*!
      * \brief Default constructor.
@@ -341,6 +345,11 @@ private:
     SAMRAI::tbox::Pointer<IBAMR::AdvDiffHierarchyIntegrator> d_thn_integrator;
 
     bool d_make_div_rhs_sum_to_zero = true;
+
+    // DEBUG regridding visit writer.
+    SAMRAI::tbox::Pointer<SAMRAI::pdat::NodeVariable<NDIM, double>> d_un_rhs_draw_var, d_us_rhs_draw_var;
+    SAMRAI::tbox::Pointer<SAMRAI::appu::VisItDataWriter<NDIM>> d_regrid_writer;
+    int d_regrid_write_int = 0;
 };
 } // namespace IBAMR
 

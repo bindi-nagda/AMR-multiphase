@@ -214,8 +214,17 @@ output_data(Pointer<PatchHierarchy<NDIM> > patch_hierarchy,
                                                         ins_integrator->getCurrentContext()));                                                    
     hier_data.setFlag(var_db->mapVariableAndContextToIndex(ins_integrator->getPressureVariable(),   // Pressure
                                                         ins_integrator->getCurrentContext()));
-    hier_data.setFlag(var_db->mapVariableAndContextToIndex(ins_integrator->getNetworkVolumeFractionVariable(), // Network volume fraction 
-                                                        adv_diff_integrator->getCurrentContext()));                                             
+    hier_data.setFlag(var_db->mapVariableAndContextToIndex(
+        ins_integrator->getNetworkVolumeFractionVariable(), // Network volume fraction
+        adv_diff_integrator->getCurrentContext()));
+    pout << "network variable name: " << ins_integrator->getNetworkVariable()->getName() << "\n";
+    pout << "network variable name: " << ins_integrator->getSolventVariable()->getName() << "\n";
+    pout << "network variable name: " << ins_integrator->getPressureVariable()->getName() << "\n";
+    pout << "network variable name: " << ins_integrator->getNetworkVolumeFractionVariable()->getName() << "\n";
+
+    pout << "ins context: " << ins_integrator->getCurrentContext()->getName() << "\n";
+    pout << "ins context: " << adv_diff_integrator->getCurrentContext()->getName() << "\n";
+
     patch_hierarchy->putToDatabase(hier_db->putDatabase("PatchHierarchy"), hier_data);
     hier_db->putDouble("loop_time", loop_time);
     hier_db->putInteger("iteration_num", iteration_num);

@@ -146,7 +146,8 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::INSVCTwoFluidStaggeredHierarchyIntegr
                              new CellVariable<NDIM, double>(object_name + "::Q"),
                              "CONSERVATIVE_COARSEN",
                              "CONSTANT_REFINE",
-                             register_for_restart)
+                             register_for_restart),
+      d_regrid_writer(new VisItDataWriter<NDIM>("RegridWriter", "regrid_viz"))
 {
     if (input_db->keyExists("viscous_time_stepping_type"))
         d_viscous_time_stepping_type =
@@ -464,8 +465,8 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::initializeHierarchyIntegrator(Pointer
     registerVariable(thn_cur_idx, d_thn_cc_var, IntVector<NDIM>(1), getCurrentContext());
     registerVariable(thn_scr_idx, d_thn_cc_var, IntVector<NDIM>(1), getScratchContext());
     registerVariable(thn_new_idx, d_thn_cc_var, IntVector<NDIM>(1), getNewContext());
-    registerVariable(un_rhs_idx, d_un_rhs_var, IntVector<NDIM>(1), getScratchContext());
-    registerVariable(us_rhs_idx, d_us_rhs_var, IntVector<NDIM>(1), getScratchContext());
+    registerVariable(un_rhs_idx, d_un_rhs_var, IntVector<NDIM>(1), getCurrentContext());
+    registerVariable(us_rhs_idx, d_us_rhs_var, IntVector<NDIM>(1), getCurrentContext());
     registerVariable(p_rhs_idx, d_p_rhs_var, IntVector<NDIM>(1), getScratchContext());
 
     // Register gradient of thn with the current context
@@ -482,22 +483,46 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::initializeHierarchyIntegrator(Pointer
         d_un_draw_var = new NodeVariable<NDIM, double>(d_object_name + "::Un_draw", NDIM);
         d_us_draw_var = new NodeVariable<NDIM, double>(d_object_name + "::Us_draw", NDIM);
         d_div_draw_var = new CellVariable<NDIM, double>(d_object_name + "::Div_Draw");
-        int un_draw_idx, us_draw_idx, div_draw_idx;
+        d_un_rhs_draw_var = new NodeVariable<NDIM, double>(d_object_name + "::Un_RHS_draw", NDIM);
+        d_us_rhs_draw_var = new NodeVariable<NDIM, double>(d_object_name + "::Us_RHS_draw", NDIM);
+        int un_draw_idx, us_draw_idx, div_draw_idx, un_rhs_draw_idx, us_rhs_draw_idx;
         registerVariable(un_draw_idx, d_un_draw_var, IntVector<NDIM>(0), getCurrentContext());
         registerVariable(us_draw_idx, d_us_draw_var, IntVector<NDIM>(0), getCurrentContext());
         registerVariable(div_draw_idx, d_div_draw_var, IntVector<NDIM>(0), getCurrentContext());
+        registerVariable(un_rhs_draw_idx, d_un_rhs_draw_var, IntVector<NDIM>(0), getCurrentContext());
+        registerVariable(us_rhs_draw_idx, d_us_rhs_draw_var, IntVector<NDIM>(0), getCurrentContext());
 
         d_visit_writer->registerPlotQuantity("Un", "VECTOR", un_draw_idx, 0, 1.0, "NODE");
+        d_regrid_writer->registerPlotQuantity("Un", "VECTOR", un_draw_idx, 0, 1.0, "NODE");
         for (int d = 0; d < NDIM; ++d)
+        {
             d_visit_writer->registerPlotQuantity("Un_" + std::to_string(d), "SCALAR", un_draw_idx, d, 1.0, "NODE");
+            d_regrid_writer->registerPlotQuantity("Un_" + std::to_string(d), "SCALAR", un_draw_idx, d, 1.0, "NODE");
+        }
 
         d_visit_writer->registerPlotQuantity("Us", "VECTOR", us_draw_idx, 0, 1.0, "NODE");
+        d_regrid_writer->registerPlotQuantity("Us", "VECTOR", us_draw_idx, 0, 1.0, "NODE");
         for (int d = 0; d < NDIM; ++d)
+        {
             d_visit_writer->registerPlotQuantity("Us_" + std::to_string(d), "SCALAR", us_draw_idx, d, 1.0, "NODE");
+            d_regrid_writer->registerPlotQuantity("Us_" + std::to_string(d), "SCALAR", us_draw_idx, d, 1.0, "NODE");
+        }
 
         d_visit_writer->registerPlotQuantity("P", "SCALAR", p_cur_idx, 0, 1.0, "CELL");
+        d_regrid_writer->registerPlotQuantity("P", "SCALAR", p_cur_idx, 0, 1.0, "CELL");
 
         d_visit_writer->registerPlotQuantity("Div", "SCALAR", div_draw_idx, 0, 1.0, "CELL");
+        d_regrid_writer->registerPlotQuantity("Div", "SCALAR", div_draw_idx, 0, 1.0, "CELL");
+
+        d_visit_writer->registerPlotQuantity("rhs_Un", "VECTOR", un_rhs_draw_idx, 0, 1.0, "NODE");
+        for (int d = 0; d < NDIM; ++d)
+            d_visit_writer->registerPlotQuantity(
+                "rhs_Un_" + std::to_string(d), "SCALAR", un_rhs_draw_idx, d, 1.0, "NODE");
+
+        d_visit_writer->registerPlotQuantity("rhs_Us", "VECTOR", us_rhs_draw_idx, 0, 1.0, "NODE");
+        for (int d = 0; d < NDIM; ++d)
+            d_visit_writer->registerPlotQuantity(
+                "rhs_Us_" + std::to_string(d), "SCALAR", us_rhs_draw_idx, d, 1.0, "NODE");
 
         // Only need to plot this variable if we aren't advecting it.
         // If we do advect theta, the advection integrator will plot it.
@@ -559,6 +584,15 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::initializeLevelDataSpecialized(Pointe
         hier_math_ops.grad(grad_thn_idx, d_grad_thn_var, 1.0, thn_idx, d_thn_cc_var, ghost_cell_fill, init_data_time);
         // TODO: Replace this with a max over the L2 norm.
         d_max_grad_thn = hier_cc_data_ops->maxNorm(grad_thn_idx, IBTK::invalid_index);
+
+        for (PatchLevel<NDIM>::Iterator p(new_level); p; p++)
+        {
+            Pointer<Patch<NDIM>> patch = new_level->getPatch(p());
+            Pointer<SideData<NDIM, double>> un_rhs_data = patch->getPatchData(d_un_rhs_var, getCurrentContext());
+            Pointer<SideData<NDIM, double>> us_rhs_data = patch->getPatchData(d_us_rhs_var, getCurrentContext());
+            un_rhs_data->fillAll(0.0);
+            us_rhs_data->fillAll(0.0);
+        }
     }
 }
 
@@ -678,8 +712,8 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::preprocessIntegrateHierarchy(const do
     d_sol_vec->addComponent(d_P_var, p_scr_idx, wgt_cc_idx, d_hier_cc_data_ops);
 
     // Set up the RHS vector
-    const int un_rhs_idx = var_db->mapVariableAndContextToIndex(d_un_rhs_var, getScratchContext());
-    const int us_rhs_idx = var_db->mapVariableAndContextToIndex(d_us_rhs_var, getScratchContext());
+    const int un_rhs_idx = var_db->mapVariableAndContextToIndex(d_un_rhs_var, getCurrentContext());
+    const int us_rhs_idx = var_db->mapVariableAndContextToIndex(d_us_rhs_var, getCurrentContext());
     const int p_rhs_idx = var_db->mapVariableAndContextToIndex(d_p_rhs_var, getScratchContext());
     d_rhs_vec = new SAMRAIVectorReal<NDIM, double>(d_object_name + "::rhs_vec", d_hierarchy, coarsest_ln, finest_ln);
     d_rhs_vec->addComponent(d_un_rhs_var, un_rhs_idx, wgt_sc_idx, d_hier_sc_data_ops);
@@ -975,6 +1009,7 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::integrateHierarchy(const double curre
     d_hier_cc_data_ops->copyData(d_sol_vec->getComponentDescriptorIndex(2), p_new_idx);
 
     // Solve for un(n+1), us(n+1), p(n+1).
+    d_sol_vec->setToScalar(0.0);
     bool converged = d_stokes_solver->solveSystem(*d_sol_vec, *d_rhs_vec);
     if (d_enable_logging)
         pout << "Stokes solver " << (converged ? "converged" : "failed to converge") << " after "
@@ -1105,6 +1140,11 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::setupPlotDataSpecialized()
     const int us_scr_idx = var_db->mapVariableAndContextToIndex(d_us_sc_var, getScratchContext());
     const int thn_cur_idx = var_db->mapVariableAndContextToIndex(d_thn_cc_var, getCurrentContext());
 
+    const int un_rhs_idx = var_db->mapVariableAndContextToIndex(d_un_rhs_var, getCurrentContext());
+    const int us_rhs_idx = var_db->mapVariableAndContextToIndex(d_us_rhs_var, getCurrentContext());
+    const int un_rhs_draw_idx = var_db->mapVariableAndContextToIndex(d_un_rhs_draw_var, getCurrentContext());
+    const int us_rhs_draw_idx = var_db->mapVariableAndContextToIndex(d_us_rhs_draw_var, getCurrentContext());
+
     static const bool synch_cf_interface = true;
     const int coarsest_ln = 0;
     const int finest_ln = d_hierarchy->getFinestLevelNumber();
@@ -1162,9 +1202,69 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::setupPlotDataSpecialized()
     hier_bdry_fill.initializeOperatorState(ghost_comp, d_hierarchy);
     hier_bdry_fill.fillData(0.0);
 
+    {
+        using ITC = HierarchyGhostCellInterpolation::InterpolationTransactionComponent;
+        std::vector<ITC> ghost_comp = { ITC(un_scr_idx,
+                                            un_rhs_idx,
+                                            "CONSERVATIVE_LINEAR_REFINE",
+                                            true,
+                                            "CONSERVATIVE_COARSEN",
+                                            "LINEAR",
+                                            false,
+                                            nullptr),
+                                        ITC(us_scr_idx,
+                                            us_rhs_idx,
+                                            "CONSERVATIVE_LINEAR_REFINE",
+                                            true,
+                                            "CONSERVATIVE_COARSEN",
+                                            "LINEAR",
+                                            false,
+                                            nullptr) };
+        HierarchyGhostCellInterpolation hier_bdry_fill;
+        hier_bdry_fill.initializeOperatorState(ghost_comp, d_hierarchy);
+        hier_bdry_fill.fillData(0.0);
+    }
+
+    // interpolate
+    d_hier_math_ops->interp(un_rhs_draw_idx,
+                            d_un_rhs_draw_var,
+                            synch_cf_interface,
+                            un_scr_idx,
+                            d_un_sc_var,
+                            nullptr,
+                            d_integrator_time,
+                            synch_cf_interface);
+    d_hier_math_ops->interp(us_rhs_draw_idx,
+                            d_us_rhs_draw_var,
+                            synch_cf_interface,
+                            us_scr_idx,
+                            d_us_sc_var,
+                            nullptr,
+                            d_integrator_time,
+                            synch_cf_interface);
+
     // Deallocate scratch data
     deallocatePatchData(un_scr_idx, coarsest_ln, finest_ln);
     deallocatePatchData(us_scr_idx, coarsest_ln, finest_ln);
+}
+
+void
+INSVCTwoFluidStaggeredHierarchyIntegrator::regridHierarchyBeginSpecialized()
+{
+    // Print out velocity data.
+    pout << "Pre regrid velocities\n";
+    setupPlotData();
+    d_regrid_writer->writePlotData(d_hierarchy, d_regrid_write_int++, d_integrator_time);
+}
+
+void
+INSVCTwoFluidStaggeredHierarchyIntegrator::regridHierarchyEndSpecialized()
+{
+    // Print out velocity data.
+    pout << "Post regrid velocities\n";
+    setupPlotData();
+    d_regrid_writer->writePlotData(d_hierarchy, d_regrid_write_int++, d_integrator_time);
+    pout << "Finished post regrid\n";
 }
 
 //////////////////////////////////////////////////////////////////////////////
