@@ -231,6 +231,9 @@ public:
                                           bool initial_time,
                                           bool uses_richardson_extrapolation_too);
 
+    virtual void initializeCompositeHierarchyDataSpecialized(const double init_data_time,
+                                                             const bool initial_time) override;
+
 protected:
     void setupPlotDataSpecialized() override;
 
@@ -347,9 +350,12 @@ private:
     bool d_make_div_rhs_sum_to_zero = true;
 
     // DEBUG regridding visit writer.
+    SAMRAI::tbox::Pointer<SAMRAI::tbox::Database> d_regrid_solve_db, d_regrid_solve_pc_db;
     SAMRAI::tbox::Pointer<SAMRAI::pdat::NodeVariable<NDIM, double>> d_un_rhs_draw_var, d_us_rhs_draw_var;
     SAMRAI::tbox::Pointer<SAMRAI::appu::VisItDataWriter<NDIM>> d_regrid_writer;
     int d_regrid_write_int = 0;
+    SAMRAI::tbox::Pointer<SAMRAI::pdat::OutersideVariable<NDIM, double>> d_os_var;
+    int d_os_idx = IBTK::invalid_index;
 };
 } // namespace IBAMR
 

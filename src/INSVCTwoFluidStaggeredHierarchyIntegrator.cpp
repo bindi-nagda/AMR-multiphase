@@ -52,6 +52,7 @@
 #include "ibtk/ibtk_utilities.h"
 #include <ibtk/CartGridFunctionSet.h>
 #include <ibtk/PETScKrylovLinearSolver.h>
+#include <ibtk/PETScKrylovPoissonSolver.h>
 
 #include "ArrayData.h"
 #include "BasePatchHierarchy.h"
@@ -162,6 +163,8 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::INSVCTwoFluidStaggeredHierarchyIntegr
     if (input_db->keyExists("grad_abs_thresh")) input_db->getArray("grad_abs_thresh", d_abs_grad_thresh);
     if (input_db->keyExists("make_div_rhs_sum_to_zero"))
         d_make_div_rhs_sum_to_zero = input_db->getBool("make_div_rhs_sum_to_zero");
+    if (input_db->keyExists("regrid_solve_db")) d_regrid_solve_db = input_db->getDatabase("regrid_solve_db");
+    if (input_db->keyExists("regrid_solve_pc_db")) d_regrid_solve_pc_db = input_db->getDatabase("regrid_solve_pc_db");
     d_un_sc_var = new SideVariable<NDIM, double>(d_object_name + "::un_sc");
     d_us_sc_var = new SideVariable<NDIM, double>(d_object_name + "::us_sc");
 
@@ -456,6 +459,9 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::initializeHierarchyIntegrator(Pointer
                      "CONSERVATIVE_LINEAR_REFINE",
                      d_p_init_fcn);
 
+    d_os_var = new OutersideVariable<NDIM, double>(d_object_name + "::os");
+    registerVariable(d_os_idx, d_os_var, 0, getCurrentContext());
+
     // Everything else only gets a scratch context, which is deallocated at the end of each time step.
     // Note the forces need ghost cells for modifying the RHS to account for non-homogenous boundary conditions.
     int thn_cur_idx, thn_scr_idx, thn_new_idx, f_p_idx, f_un_idx, f_us_idx, un_rhs_idx, us_rhs_idx, p_rhs_idx;
@@ -488,7 +494,7 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::initializeHierarchyIntegrator(Pointer
         int un_draw_idx, us_draw_idx, div_draw_idx, un_rhs_draw_idx, us_rhs_draw_idx;
         registerVariable(un_draw_idx, d_un_draw_var, IntVector<NDIM>(0), getCurrentContext());
         registerVariable(us_draw_idx, d_us_draw_var, IntVector<NDIM>(0), getCurrentContext());
-        registerVariable(div_draw_idx, d_div_draw_var, IntVector<NDIM>(0), getCurrentContext());
+        registerVariable(div_draw_idx, d_div_draw_var, IntVector<NDIM>(1), getCurrentContext());
         registerVariable(un_rhs_draw_idx, d_un_rhs_draw_var, IntVector<NDIM>(0), getCurrentContext());
         registerVariable(us_rhs_draw_idx, d_us_rhs_draw_var, IntVector<NDIM>(0), getCurrentContext());
 
@@ -1118,6 +1124,175 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::regridProjection()
     // onto a divergence free field.
     // TODO: Do we need to implement this? How do we project something that has a co-incompressibility condition.
     // TODO: Check divergence norms to ensure our regridding process does not introduce too large of errors.
+
+    const int coarsest_ln = 0;
+    const int finest_ln = d_hierarchy->getFinestLevelNumber();
+    const int wgt_cc_idx = d_hier_math_ops->getCellWeightPatchDescriptorIndex();
+    const double volume = d_hier_math_ops->getVolumeOfPhysicalDomain();
+
+    auto var_db = VariableDatabase<NDIM>::getDatabase();
+    const int p_scr_idx = var_db->mapVariableAndContextToIndex(d_P_var, getScratchContext());
+    const int div_idx = var_db->mapVariableAndContextToIndex(d_div_draw_var, getCurrentContext());
+    const int un_cur_idx = var_db->mapVariableAndContextToIndex(d_un_sc_var, getCurrentContext());
+    const int un_scr_idx = var_db->mapVariableAndContextToIndex(d_un_sc_var, getScratchContext());
+    const int us_cur_idx = var_db->mapVariableAndContextToIndex(d_us_sc_var, getCurrentContext());
+    const int us_scr_idx = var_db->mapVariableAndContextToIndex(d_us_sc_var, getScratchContext());
+    const int thn_cur_idx = var_db->mapVariableAndContextToIndex(d_thn_cc_var, getCurrentContext());
+
+    // Setup solver vectors
+    SAMRAIVectorReal<NDIM, double> sol_vec(d_object_name + "::sol_vec", d_hierarchy, coarsest_ln, finest_ln);
+    sol_vec.addComponent(d_P_var, p_scr_idx, wgt_cc_idx, d_hier_cc_data_ops);
+    SAMRAIVectorReal<NDIM, double> rhs_vec(d_object_name + "::rhs_vec", d_hierarchy, coarsest_ln, finest_ln);
+    rhs_vec.addComponent(d_div_draw_var, div_idx, wgt_cc_idx, d_hier_cc_data_ops);
+
+    Pointer<PoissonSolver> regrid_projection_solver =
+        CCPoissonSolverManager::getManager()->allocateSolver(CCPoissonSolverManager::DEFAULT_KRYLOV_SOLVER,
+                                                             "RegridSolver",
+                                                             d_regrid_solve_db,
+                                                             "regrid_solver_",
+                                                             CCPoissonSolverManager::DEFAULT_FAC_PRECONDITIONER,
+                                                             "RegridPC",
+                                                             d_regrid_solve_pc_db,
+                                                             "regrid_solver_pc_");
+    PoissonSpecifications regrid_projection_spec(d_object_name + "::regrid_projection_spec");
+    regrid_projection_spec.setCZero();
+    regrid_projection_spec.setDConstant(1.0);
+    LocationIndexRobinBcCoefs<NDIM> Phi_bc_coef;
+    for (unsigned int d = 0; d < NDIM; ++d)
+    {
+        Phi_bc_coef.setBoundarySlope(2 * d, 0.0);
+        Phi_bc_coef.setBoundarySlope(2 * d + 1, 0.0);
+    }
+
+    regrid_projection_solver->setPoissonSpecifications(regrid_projection_spec);
+    regrid_projection_solver->setPhysicalBcCoef(&Phi_bc_coef);
+    regrid_projection_solver->setHomogeneousBc(true);
+    regrid_projection_solver->setSolutionTime(d_integrator_time);
+    regrid_projection_solver->setTimeInterval(d_integrator_time, d_integrator_time);
+    auto p_regrid_projection_solver = dynamic_cast<LinearSolver*>(regrid_projection_solver.getPointer());
+    if (p_regrid_projection_solver)
+    {
+        p_regrid_projection_solver->setInitialGuessNonzero(false);
+        p_regrid_projection_solver->setNullspace(true);
+    }
+
+    // Allocate temporary data
+    ComponentSelector scratch_idxs;
+    scratch_idxs.setFlag(un_scr_idx);
+    scratch_idxs.setFlag(us_scr_idx);
+    scratch_idxs.setFlag(p_scr_idx);
+    for (int ln = coarsest_ln; ln <= finest_ln; ++ln)
+    {
+        Pointer<PatchLevel<NDIM>> level = d_hierarchy->getPatchLevel(ln);
+        level->allocatePatchData(scratch_idxs, d_integrator_time);
+    }
+
+    // Setup RHS vector
+    // We need ghost cells to interpolate to nodes.
+    using ITC = HierarchyGhostCellInterpolation::InterpolationTransactionComponent;
+    std::vector<ITC> ghost_comp = { ITC(
+        thn_cur_idx, "CONSERVATIVE_LINEAR_REFINE", true, "CONSERVATIVE_COARSEN", "LINEAR", false, nullptr) };
+    HierarchyGhostCellInterpolation hier_bdry_fill;
+    hier_bdry_fill.initializeOperatorState(ghost_comp, d_hierarchy);
+    hier_bdry_fill.fillData(0.0);
+    pre_div_interp(un_scr_idx, thn_cur_idx, un_cur_idx, us_cur_idx, d_hierarchy);
+    d_hier_math_ops->div(div_idx, d_div_draw_var, 1.0, un_scr_idx, d_un_sc_var, nullptr, 0.0, true);
+    ghost_comp = { ITC(div_idx, "NONE", false, "CONSERVATIVE_COARSEN", "LINEAR", false, nullptr) };
+    hier_bdry_fill.deallocateOperatorState();
+    hier_bdry_fill.initializeOperatorState(ghost_comp, d_hierarchy);
+    hier_bdry_fill.fillData(0.0);
+
+    const double div_U_mean = 1.0 / volume * d_hier_cc_data_ops->integral(div_idx, wgt_cc_idx);
+    d_hier_cc_data_ops->addScalar(div_idx, div_idx, -div_U_mean);
+
+    // Solve the projection poisson problem
+    regrid_projection_solver->solveSystem(sol_vec, rhs_vec);
+    plog << d_object_name
+         << "::regridProjection(): regrid projection solve "
+            "number of iterations = "
+         << regrid_projection_solver->getNumIterations() << "\n";
+    plog << d_object_name
+         << "::regridProjection(): regrid projection solve "
+            "residual norm        = "
+         << regrid_projection_solver->getResidualNorm() << "\n";
+
+    // Fill ghost cells for phi, compute grad phi, and set un := un - thn*grad(phi) and us := us - ths*grad(phi)
+    ghost_comp = { ITC(
+        p_scr_idx, "CONSERVATIVE_LINEAR_REFINE", true, "CONSERVATIVE_COARSEN", "LINEAR", false, nullptr) };
+    hier_bdry_fill.deallocateOperatorState();
+    hier_bdry_fill.initializeOperatorState(ghost_comp, d_hierarchy);
+    hier_bdry_fill.fillData(0.0);
+
+    for (int ln = coarsest_ln; ln <= finest_ln; ++ln)
+    {
+        Pointer<PatchLevel<NDIM>> level = d_hierarchy->getPatchLevel(ln);
+        for (PatchLevel<NDIM>::Iterator p(level); p; p++)
+        {
+            Pointer<Patch<NDIM>> patch = level->getPatch(p());
+            Pointer<CellData<NDIM, double>> phi_data = patch->getPatchData(p_scr_idx);
+            Pointer<SideData<NDIM, double>> un_data = patch->getPatchData(un_cur_idx);
+            Pointer<SideData<NDIM, double>> us_data = patch->getPatchData(us_cur_idx);
+            Pointer<CellData<NDIM, double>> thn_data = patch->getPatchData(thn_cur_idx);
+
+            Pointer<CartesianPatchGeometry<NDIM>> pgeom = patch->getPatchGeometry();
+            const double* const dx = pgeom->getDx();
+
+            for (int axis = 0; axis < NDIM; ++axis)
+            {
+                for (SideIterator<NDIM> si(patch->getBox(), axis); si; si++)
+                {
+                    const SideIndex<NDIM>& idx = si();
+                    double grad_phi = ((*phi_data)(idx.toCell(1)) - (*phi_data)(idx.toCell(0))) / dx[axis];
+                    double thn = 0.5 * ((*thn_data)(idx.toCell(1)) + (*thn_data)(idx.toCell(0)));
+                    (*un_data)(idx) = (*un_data)(idx)-thn * grad_phi;
+                    (*us_data)(idx) = (*us_data)(idx) - (1.0 + thn) * grad_phi;
+                }
+            }
+        }
+    }
+
+    // Synchronize cf-interfaces
+    auto sync_fcn = [&](const int dst_idx) -> void
+    {
+        for (int ln = d_hierarchy->getFinestLevelNumber(); ln > 0; --ln)
+        {
+            Pointer<PatchLevel<NDIM>> level = d_hierarchy->getPatchLevel(ln);
+            for (PatchLevel<NDIM>::Iterator p(level); p; p++)
+            {
+                Pointer<Patch<NDIM>> patch = level->getPatch(p());
+                Pointer<SideData<NDIM, double>> dst_data = patch->getPatchData(dst_idx);
+                Pointer<OutersideData<NDIM, double>> os_data = patch->getPatchData(d_os_idx);
+                os_data->copy(*dst_data);
+            }
+            Pointer<CoarsenAlgorithm<NDIM>> coarsen_alg = new CoarsenAlgorithm<NDIM>();
+            Pointer<CartesianGridGeometry<NDIM>> grid_geom = d_hierarchy->getGridGeometry();
+            Pointer<CoarsenOperator<NDIM>> os_coarsen_op =
+                grid_geom->lookupCoarsenOperator(d_os_var, "CONSERVATIVE_COARSEN");
+            coarsen_alg->registerCoarsen(dst_idx, d_os_idx, os_coarsen_op);
+            std::vector<Pointer<CoarsenSchedule<NDIM>>> os_coarsen_scheds(finest_ln - coarsest_ln);
+            for (int dst_ln = coarsest_ln; dst_ln < finest_ln; ++dst_ln)
+            {
+                Pointer<PatchLevel<NDIM>> src_level = d_hierarchy->getPatchLevel(dst_ln + 1);
+                Pointer<PatchLevel<NDIM>> dst_level = d_hierarchy->getPatchLevel(dst_ln);
+                os_coarsen_scheds[dst_ln] = coarsen_alg->createSchedule(dst_level, src_level);
+            }
+            os_coarsen_scheds[ln - 1]->coarsenData();
+        }
+    };
+
+    sync_fcn(us_cur_idx);
+    sync_fcn(un_cur_idx);
+
+    // Deallocate scratch data
+    for (int ln = coarsest_ln; ln <= finest_ln; ++ln)
+    {
+        Pointer<PatchLevel<NDIM>> level = d_hierarchy->getPatchLevel(ln);
+        level->deallocatePatchData(scratch_idxs);
+    }
+
+    // Synchronize data on patch hierarchy
+    synchronizeHierarchyData(CURRENT_DATA);
+    return;
 }
 
 double
@@ -1266,6 +1441,22 @@ INSVCTwoFluidStaggeredHierarchyIntegrator::regridHierarchyEndSpecialized()
     d_regrid_writer->writePlotData(d_hierarchy, d_regrid_write_int++, d_integrator_time);
     pout << "Finished post regrid\n";
 }
+
+void
+INSVCTwoFluidStaggeredHierarchyIntegrator::initializeCompositeHierarchyDataSpecialized(const double /*init_data_time*/,
+                                                                                       const bool initial_time)
+{
+    // Project the interpolated velocity if needed.
+    if (!initial_time)
+    {
+        plog << d_object_name << "::initializeCompositeHierarchyData():\n"
+             << "  projecting the interpolated velocity field\n";
+        regridProjection();
+        setupPlotData();
+        d_regrid_writer->writePlotData(d_hierarchy, d_regrid_write_int++, d_integrator_time);
+    }
+    return;
+} // initializeCompositeHierarchyDataSpecialized
 
 //////////////////////////////////////////////////////////////////////////////
 
